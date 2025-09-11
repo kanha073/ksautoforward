@@ -13,19 +13,43 @@ app = Client("forwarder_bot",
              api_hash=API_HASH,
              bot_token=BOT_TOKEN)
 
-# Source channel se target channels me copy karna (without forward tag)
+# Mapping store karne ke liye (source_msg_id -> {target_channel: target_msg_id})
+message_map = {}
+
+# Copy messages (no forward tag) + store mapping
 @app.on_message(filters.chat(SOURCE_CHANNEL))
 async def copy_to_channels(client, message):
+    text = message.text or message.caption
+    if not text:  # agar message me text hi nahi hai to skip kar do
+        return
+
+    message_map[message.id] = {}
     for channel in TARGET_CHANNELS:
         try:
-            await message.copy(chat_id=channel)  # forward ke jagah copy
+            sent = await client.send_message(chat_id=channel, text=text)
+            message_map[message.id][channel] = sent.id
         except Exception as e:
-            print(f"Error sending to {channel}: {e}")
+            print(f"❌ Error sending to {channel}: {e}")
 
-# Test command
-@app.on_message(filters.command("start") & filters.private)
-async def start_command(client, message):
-    await message.reply("✅ Bot is running! Messages will be copied (no forward tag).")
+# Sync edits from source channel
+@app.on_edited_message(filters.chat(SOURCE_CHANNEL))
+async def edit_in_channels(client, message):
+    text = message.text or message.caption
+    if not text:
+        return
 
-print("Bot Started...")
+    if message.id not in message_map:
+        return
+
+    for channel, target_id in message_map[message.id].items():
+        try:
+            await client.edit_message_text(
+                chat_id=channel,
+                message_id=target_id,
+                text=text
+            )
+        except Exception as e:
+            print(f"❌ Error editing in {channel}: {e}")
+
+print("🚀 Bot Started with text edit sync...")
 app.run()
