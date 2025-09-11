@@ -1,5 +1,6 @@
-from pyrogram import Client, filters
 import os
+import sqlite3
+from pyrogram import Client, filters
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
@@ -8,48 +9,70 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SOURCE_CHANNEL = int(os.getenv("SOURCE_CHANNEL"))
 TARGET_CHANNELS = [int(x) for x in os.getenv("TARGET_CHANNELS").split(",")]
 
+# DB setup
+conn = sqlite3.connect("messages.db", check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS message_map (
+    source_id INTEGER,
+    channel_id INTEGER,
+    target_id INTEGER,
+    PRIMARY KEY (source_id, channel_id)
+)
+""")
+conn.commit()
+
 app = Client("forwarder_bot",
              api_id=API_ID,
              api_hash=API_HASH,
              bot_token=BOT_TOKEN)
 
-# Mapping store karne ke liye (source_msg_id -> {target_channel: target_msg_id})
-message_map = {}
+# Save mapping to DB
+def save_mapping(source_id, channel_id, target_id):
+    cursor.execute(
+        "INSERT OR REPLACE INTO message_map (source_id, channel_id, target_id) VALUES (?, ?, ?)",
+        (source_id, channel_id, target_id)
+    )
+    conn.commit()
 
-# Copy messages (no forward tag) + store mapping
+# Get mapping from DB
+def get_mappings(source_id):
+    cursor.execute("SELECT channel_id, target_id FROM message_map WHERE source_id=?", (source_id,))
+    return cursor.fetchall()
+
+# Handle new messages
 @app.on_message(filters.chat(SOURCE_CHANNEL))
 async def copy_to_channels(client, message):
     text = message.text or message.caption
-    if not text:  # agar message me text hi nahi hai to skip kar do
+    if not text:  # ignore pure media for now
         return
 
-    message_map[message.id] = {}
     for channel in TARGET_CHANNELS:
         try:
-            sent = await client.send_message(chat_id=channel, text=text)
-            message_map[message.id][channel] = sent.id
+            sent = await client.send_message(channel, text)
+            save_mapping(message.id, channel, sent.id)
+            print(f"✅ New msg {message.id} copied to {channel} as {sent.id}")
         except Exception as e:
             print(f"❌ Error sending to {channel}: {e}")
 
-# Sync edits from source channel
+# Handle edits
 @app.on_edited_message(filters.chat(SOURCE_CHANNEL))
 async def edit_in_channels(client, message):
     text = message.text or message.caption
     if not text:
         return
 
-    if message.id not in message_map:
+    mappings = get_mappings(message.id)
+    if not mappings:
+        print(f"⚠️ No mappings found for {message.id}")
         return
 
-    for channel, target_id in message_map[message.id].items():
+    for channel_id, target_id in mappings:
         try:
-            await client.edit_message_text(
-                chat_id=channel,
-                message_id=target_id,
-                text=text
-            )
+            await client.edit_message_text(channel_id, target_id, text)
+            print(f"✏️ Edited msg {target_id} in {channel_id}")
         except Exception as e:
-            print(f"❌ Error editing in {channel}: {e}")
+            print(f"❌ Error editing in {channel_id}: {e}")
 
-print("🚀 Bot Started with text edit sync...")
+print("🚀 Bot started with DB-based edit sync")
 app.run()
