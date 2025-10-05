@@ -3,6 +3,9 @@ import sqlite3
 import asyncio
 from pyrogram import Client, filters, idle
 
+# ─── ENSURE PERSISTENT FOLDER ─────────────────────────────
+os.makedirs("/mnt/data", exist_ok=True)  # Koyeb persistent folder
+
 # ─── ENVIRONMENT VARIABLES ────────────────────────────────
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
@@ -12,7 +15,8 @@ SOURCE_CHANNEL = int(os.getenv("SOURCE_CHANNEL"))
 TARGET_CHANNELS = [int(x) for x in os.getenv("TARGET_CHANNELS").split(",")]
 
 # ─── DATABASE SETUP ───────────────────────────────────────
-conn = sqlite3.connect("/mnt/data/messages.db", check_same_thread=False)  # Koyeb persistent storage
+DB_PATH = "/mnt/data/messages.db"
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS message_map (
@@ -24,9 +28,10 @@ CREATE TABLE IF NOT EXISTS message_map (
 """)
 conn.commit()
 
-# ─── CLIENT ───────────────────────────────────────────────
+# ─── CLIENT SETUP ────────────────────────────────────────
+SESSION_PATH = "/mnt/data/forwarder_bot.session"
 app = Client(
-    "/mnt/data/forwarder_bot.session",  # Koyeb persistent session
+    SESSION_PATH,  # persistent session
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
