@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import asyncio
 from pyrogram import Client, filters, idle
 
 # ─── ENVIRONMENT VARIABLES ────────────────────────────────
@@ -11,7 +12,7 @@ SOURCE_CHANNEL = int(os.getenv("SOURCE_CHANNEL"))
 TARGET_CHANNELS = [int(x) for x in os.getenv("TARGET_CHANNELS").split(",")]
 
 # ─── DATABASE SETUP ───────────────────────────────────────
-conn = sqlite3.connect("messages.db", check_same_thread=False)
+conn = sqlite3.connect("/mnt/data/messages.db", check_same_thread=False)  # Koyeb persistent storage
 cursor = conn.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS message_map (
@@ -25,7 +26,7 @@ conn.commit()
 
 # ─── CLIENT ───────────────────────────────────────────────
 app = Client(
-    "forwarder_bot",
+    "/mnt/data/forwarder_bot.session",  # Koyeb persistent session
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
@@ -47,16 +48,18 @@ def get_mappings(source_id):
 @app.on_message(filters.chat(SOURCE_CHANNEL))
 async def copy_to_channels(client, message):
     text = message.text or message.caption
-    if not text:  # ignore pure media for now
+    if not text:
         return
 
-    for channel in TARGET_CHANNELS:
-        try:
-            sent = await client.send_message(channel, text)
-            save_mapping(message.id, channel, sent.id)
-            print(f"✅ New msg {message.id} copied to {channel} as {sent.id}")
-        except Exception as e:
-            print(f"❌ Error sending to {channel}: {e}")
+    mappings = get_mappings(message.id)
+    if not mappings:  # new message
+        for channel in TARGET_CHANNELS:
+            try:
+                sent = await client.send_message(channel, text)
+                save_mapping(message.id, channel, sent.id)
+                print(f"✅ New msg {message.id} copied to {channel} as {sent.id}")
+            except Exception as e:
+                print(f"❌ Error sending to {channel}: {e}")
 
 # ─── EDIT HANDLER ─────────────────────────────────────────
 @app.on_edited_message(filters.chat(SOURCE_CHANNEL))
@@ -67,7 +70,7 @@ async def edit_in_channels(client, message):
 
     mappings = get_mappings(message.id)
     if not mappings:
-        print(f"⚠️ No mappings found for {message.id}")
+        print(f"⚠️ No mapping found for {message.id}. Possibly an old message forwarded manually.")
         return
 
     for channel_id, target_id in mappings:
@@ -77,39 +80,12 @@ async def edit_in_channels(client, message):
         except Exception as e:
             print(f"❌ Error editing in {channel_id}: {e}")
 
-# ─── OLD MESSAGE SYNC FUNCTION ────────────────────────────
-async def sync_old_messages():
-    print("🔍 Starting full old message sync...")
-    async for message in app.get_chat_history(SOURCE_CHANNEL):
-        text = message.text or message.caption
-        if not text:
-            continue
-
-        # Check if message already exists in DB
-        cursor.execute("SELECT * FROM message_map WHERE source_id=?", (message.id,))
-        if cursor.fetchone():
-            continue  # already synced
-
-        # Send to target channels
-        for channel in TARGET_CHANNELS:
-            try:
-                sent = await app.send_message(channel, text)
-                save_mapping(message.id, channel, sent.id)
-                print(f"📦 Synced old msg {message.id} → {channel}")
-            except Exception as e:
-                print(f"❌ Error syncing old msg {message.id} to {channel}: {e}")
-
-    print("✅ Old message sync complete.")
-
 # ─── MAIN FUNCTION ────────────────────────────────────────
 async def main():
     await app.start()
-    print("🚀 Bot started successfully. Running old message sync...")
-    await sync_old_messages()
-    print("✅ Ready for live message + edit sync.")
+    print("🚀 Bot started successfully. Ready for live message + edit sync.")
     await idle()
     await app.stop()
 
 # ─── RUN ──────────────────────────────────────────────────
-import asyncio
 asyncio.run(main())
