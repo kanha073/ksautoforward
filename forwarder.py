@@ -1,115 +1,59 @@
 import os
-import sqlite3
-from pyrogram import Client, filters, idle
+import asyncio
+from pyrogram import Client, filters
 
-# ─── ENVIRONMENT VARIABLES ────────────────────────────────
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Env variables
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-SOURCE_CHANNEL = int(os.getenv("SOURCE_CHANNEL"))
-TARGET_CHANNELS = [int(x) for x in os.getenv("TARGET_CHANNELS").split(",")]
+SOURCE_CHANNEL = int(os.environ.get("SOURCE_CHANNEL", 0))  # -100 se start hoga
+TARGET_CHANNELS = [int(x) for x in os.environ.get("TARGET_CHANNELS", "").split(",") if x]
 
-# ─── DATABASE SETUP ───────────────────────────────────────
-conn = sqlite3.connect("messages.db", check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS message_map (
-    source_id INTEGER,
-    channel_id INTEGER,
-    target_id INTEGER,
-    PRIMARY KEY (source_id, channel_id)
-)
-""")
-conn.commit()
-
-# ─── CLIENT ───────────────────────────────────────────────
+# Bot client
 app = Client(
-    "forwarder_bot",
+    "forwarder-bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
 )
 
-# ─── DATABASE FUNCTIONS ───────────────────────────────────
-def save_mapping(source_id, channel_id, target_id):
-    cursor.execute(
-        "INSERT OR REPLACE INTO message_map (source_id, channel_id, target_id) VALUES (?, ?, ?)",
-        (source_id, channel_id, target_id)
-    )
-    conn.commit()
-
-def get_mappings(source_id):
-    cursor.execute("SELECT channel_id, target_id FROM message_map WHERE source_id=?", (source_id,))
-    return cursor.fetchall()
-
-# ─── NEW MESSAGE HANDLER ──────────────────────────────────
-@app.on_message(filters.chat(SOURCE_CHANNEL))
-async def copy_to_channels(client, message):
-    text = message.text or message.caption
-    if not text:  # ignore pure media for now
-        return
-
-    for channel in TARGET_CHANNELS:
-        try:
-            sent = await client.send_message(channel, text)
-            save_mapping(message.id, channel, sent.id)
-            print(f"✅ New msg {message.id} copied to {channel} as {sent.id}")
-        except Exception as e:
-            print(f"❌ Error sending to {channel}: {e}")
-
-# ─── EDIT HANDLER ─────────────────────────────────────────
-@app.on_edited_message(filters.chat(SOURCE_CHANNEL))
-async def edit_in_channels(client, message):
-    text = message.text or message.caption
-    if not text:
-        return
-
-    mappings = get_mappings(message.id)
-    if not mappings:
-        print(f"⚠️ No mappings found for {message.id}")
-        return
-
-    for channel_id, target_id in mappings:
-        try:
-            await client.edit_message_text(channel_id, target_id, text)
-            print(f"✏️ Edited msg {target_id} in {channel_id}")
-        except Exception as e:
-            print(f"❌ Error editing in {channel_id}: {e}")
-
-# ─── OLD MESSAGE SYNC FUNCTION ────────────────────────────
+# ✅ Old messages sync
 async def sync_old_messages():
     print("🔍 Starting full old message sync...")
-    async for message in app.get_chat_history(SOURCE_CHANNEL):
-        text = message.text or message.caption
-        if not text:
-            continue
 
-        # Check if message already exists in DB
-        cursor.execute("SELECT * FROM message_map WHERE source_id=?", (message.id,))
-        if cursor.fetchone():
-            continue  # already synced
+    # Force resolve channel peer (Fixes Peer ID Invalid error)
+    await app.get_chat(SOURCE_CHANNEL)
 
-        # Send to target channels
-        for channel in TARGET_CHANNELS:
+    async for message in app.get_chat_history(SOURCE_CHANNEL, limit=0):
+        for target in TARGET_CHANNELS:
             try:
-                sent = await app.send_message(channel, text)
-                save_mapping(message.id, channel, sent.id)
-                print(f"📦 Synced old msg {message.id} → {channel}")
+                await app.copy_message(
+                    chat_id=target,
+                    from_chat_id=SOURCE_CHANNEL,
+                    message_id=message.id
+                )
+                print(f"✅ Synced old msg {message.id} -> {target}")
             except Exception as e:
-                print(f"❌ Error syncing old msg {message.id} to {channel}: {e}")
+                print(f"❌ Failed to forward {message.id}: {e}")
 
-    print("✅ Old message sync complete.")
+# ✅ New message forward
+@app.on_message(filters.chat(SOURCE_CHANNEL))
+async def forward_new_message(client, message):
+    for target in TARGET_CHANNELS:
+        try:
+            await message.copy(chat_id=target)
+            print(f"📩 Forwarded new msg {message.id} -> {target}")
+        except Exception as e:
+            print(f"❌ Failed to forward new msg {message.id}: {e}")
 
-# ─── MAIN FUNCTION ────────────────────────────────────────
+# ✅ Bot runner
 async def main():
-    await app.start()
-    print("🚀 Bot started successfully. Running old message sync...")
-    await sync_old_messages()
-    print("✅ Ready for live message + edit sync.")
-    await idle()
-    await app.stop()
+    async with app:
+        print("🚀 Bot started successfully. Running old message sync...")
+        await sync_old_messages()
+        print("✅ Old sync completed. Now listening for new messages...")
+        await asyncio.Event().wait()
 
-# ─── RUN ──────────────────────────────────────────────────
-import asyncio
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
