@@ -7,7 +7,10 @@ import os
 api_id = int(os.getenv("API_ID"))
 api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
-invite_link = os.getenv("SOURCE_INVITE")  # Telegram join link
+
+# Use numeric ID (-100xxxxxxxxx) for private channel OR @username for public
+source_channel_id = os.getenv("SOURCE_CHANNEL")  # "-1001234567890" or "@channelusername"
+
 target_channels = [int(ch.strip()) for ch in os.getenv("TARGET_CHANNELS").split(",")]
 mongo_uri = os.getenv("MONGO_URI")
 
@@ -19,20 +22,7 @@ collection = db["message_links"]
 bot = Client("forwarder", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
 
 
-async def setup_source_channel():
-    """Join private channel using invite link and return channel ID"""
-    try:
-        chat = await bot.join_chat(invite_link)
-        if chat is None or chat.id is None:
-            print("❌ Invalid invite link or bot cannot join the channel.")
-            return None
-        print(f"✅ Joined channel: {chat.title} (ID: {chat.id})")
-        return chat.id
-    except Exception as e:
-        print(f"❌ Could not join channel: {e}")
-        return None
-
-
+@bot.on_message(filters.chat(source_channel_id))
 async def forward_new_message(client, message):
     """Forward new messages from source to targets"""
     try:
@@ -50,6 +40,7 @@ async def forward_new_message(client, message):
         print(f"⚠️ Error forwarding new message: {e}")
 
 
+@bot.on_edited_message(filters.chat(source_channel_id))
 async def handle_edit(client, message):
     """Sync edits to target channels"""
     try:
@@ -97,22 +88,17 @@ async def check_old_messages():
 
 async def start_bot():
     await bot.start()
-    global source_channel_id
-    source_channel_id = await setup_source_channel()
-    if not source_channel_id:
-        print("❌ Cannot start bot without source channel access.")
-        await bot.stop()
-        return
+    print("🚀 Bot started successfully!")
 
-    # Register handlers
-    bot.add_handler(bot.on_message(filters.chat(lambda chat_id: chat_id == source_channel_id))(forward_new_message))
-    bot.add_handler(bot.on_edited_message(filters.chat(lambda chat_id: chat_id == source_channel_id))(handle_edit))
-
+    # Track old messages first
     await check_old_messages()
-    print("🚀 Bot running — forwarding + edit sync active!")
+    print("📄 Old messages tracking complete.")
+
+    # Start idle to keep bot running
     await idle()
 
 
 if __name__ == "__main__":
+    # Heroku / Koyeb compatible asyncio loop
     loop = asyncio.get_event_loop()
     loop.run_until_complete(start_bot())
