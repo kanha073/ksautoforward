@@ -1,78 +1,97 @@
-import os
-import sqlite3
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
+from pymongo import MongoClient
+import asyncio, os
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Environment Variables
+api_id = int(os.getenv("API_ID"))
+api_hash = os.getenv("API_HASH")
+bot_token = os.getenv("BOT_TOKEN")
+source_channel = int(os.getenv("SOURCE_CHANNEL"))
+target_channels = [int(ch.strip()) for ch in os.getenv("TARGET_CHANNELS").split(",")]
+mongo_uri = os.getenv("MONGO_URI")
 
-SOURCE_CHANNEL = int(os.getenv("SOURCE_CHANNEL"))
-TARGET_CHANNELS = [int(x) for x in os.getenv("TARGET_CHANNELS").split(",")]
+# MongoDB Setup
+mongo_client = MongoClient(mongo_uri)
+db = mongo_client["forwarder_db"]
+collection = db["message_links"]
 
-# DB setup
-conn = sqlite3.connect("messages.db", check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS message_map (
-    source_id INTEGER,
-    channel_id INTEGER,
-    target_id INTEGER,
-    PRIMARY KEY (source_id, channel_id)
-)
-""")
-conn.commit()
+bot = Client("forwarder", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
 
-app = Client("forwarder_bot",
-             api_id=API_ID,
-             api_hash=API_HASH,
-             bot_token=BOT_TOKEN)
 
-# Save mapping to DB
-def save_mapping(source_id, channel_id, target_id):
-    cursor.execute(
-        "INSERT OR REPLACE INTO message_map (source_id, channel_id, target_id) VALUES (?, ?, ?)",
-        (source_id, channel_id, target_id)
-    )
-    conn.commit()
+@bot.on_message(filters.chat(source_channel))
+async def forward_new_message(client, message):
+    """Forward new messages from source to targets"""
+    try:
+        existing = collection.find_one({"source_id": message.id})
+        if existing:
+            return  # Already handled
 
-# Get mapping from DB
-def get_mappings(source_id):
-    cursor.execute("SELECT channel_id, target_id FROM message_map WHERE source_id=?", (source_id,))
-    return cursor.fetchall()
+        for target in target_channels:
+            sent = await message.copy(target)
+            collection.insert_one({
+                "source_id": message.id,
+                "target_id": sent.id,
+                "target_chat": target
+            })
+            print(f"✅ Forwarded new message {message.id} → {target}")
+    except Exception as e:
+        print(f"⚠️ Error forwarding new message: {e}")
 
-# Handle new messages
-@app.on_message(filters.chat(SOURCE_CHANNEL))
-async def copy_to_channels(client, message):
-    text = message.text or message.caption
-    if not text:  # ignore pure media for now
-        return
 
-    for channel in TARGET_CHANNELS:
-        try:
-            sent = await client.send_message(channel, text)
-            save_mapping(message.id, channel, sent.id)
-            print(f"✅ New msg {message.id} copied to {channel} as {sent.id}")
-        except Exception as e:
-            print(f"❌ Error sending to {channel}: {e}")
+@bot.on_edited_message(filters.chat(source_channel))
+async def handle_edit(client, message):
+    """Edit sync for both old and new messages"""
+    try:
+        linked_msgs = list(collection.find({"source_id": message.id}))
 
-# Handle edits
-@app.on_edited_message(filters.chat(SOURCE_CHANNEL))
-async def edit_in_channels(client, message):
-    text = message.text or message.caption
-    if not text:
-        return
+        # If old msg not tracked yet → add it (no forward)
+        if not linked_msgs:
+            collection.insert_one({
+                "source_id": message.id,
+                "target_id": None,
+                "target_chat": None
+            })
+            print(f"📄 Old message {message.id} detected — now tracked for edits.")
+            return
 
-    mappings = get_mappings(message.id)
-    if not mappings:
-        print(f"⚠️ No mappings found for {message.id}")
-        return
+        # Update all linked targets
+        for link in linked_msgs:
+            if not link["target_id"] or not link["target_chat"]:
+                continue
+            try:
+                await bot.edit_message_text(
+                    chat_id=link["target_chat"],
+                    message_id=link["target_id"],
+                    text=message.text or "",
+                    entities=message.entities
+                )
+                print(f"✏️ Synced edit: {message.id} → {link['target_chat']}")
+            except Exception as e:
+                print(f"⚠️ Edit failed for {link['target_chat']}: {e}")
 
-    for channel_id, target_id in mappings:
-        try:
-            await client.edit_message_text(channel_id, target_id, text)
-            print(f"✏️ Edited msg {target_id} in {channel_id}")
-        except Exception as e:
-            print(f"❌ Error editing in {channel_id}: {e}")
+    except Exception as e:
+        print(f"⚠️ Error handling edit: {e}")
 
-print("🚀 Bot started with DB-based edit sync")
-app.run()
+
+async def check_old_messages():
+    """Track old messages (without forwarding them)"""
+    async with bot:
+        async for msg in bot.get_chat_history(source_channel, limit=0):
+            if not collection.find_one({"source_id": msg.id}):
+                collection.insert_one({
+                    "source_id": msg.id,
+                    "target_id": None,
+                    "target_chat": None
+                })
+                print(f"🕰️ Old message added to tracking list: {msg.id}")
+
+
+async def main():
+    await check_old_messages()
+    print("🚀 Bot is running — forwarding + syncing edits active...")
+    await bot.start()
+    await idle()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
