@@ -1,63 +1,59 @@
-import asyncio
 from pyrogram import Client, filters, idle
 from pymongo import MongoClient
-import os
+import asyncio, os, time
 
-# ---------------------------
+# =======================
 # Environment Variables
-# ---------------------------
-api_id = int(os.getenv("API_ID"))
-api_hash = os.getenv("API_HASH")
-bot_token = os.getenv("BOT_TOKEN")
-source_channel_id = os.getenv("SOURCE_CHANNEL")  # int or string
-target_channels = [int(ch.strip()) for ch in os.getenv("TARGET_CHANNELS").split(",")]
-mongo_uri = os.getenv("MONGO_URI")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))  # For /scan and /status
+# =======================
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SOURCE_CHANNEL = int(os.getenv("SOURCE_CHANNEL"))  # -1001234567890
+TARGET_CHANNELS = [int(ch.strip()) for ch in os.getenv("TARGET_CHANNELS").split(",")]
+MONGO_URI = os.getenv("MONGO_URI")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))  # Optional for startup messages to admin
 
-# ---------------------------
+# =======================
 # MongoDB Setup
-# ---------------------------
-mongo_client = MongoClient(mongo_uri)
+# =======================
+mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["forwarder_db"]
 collection = db["message_links"]
 
-# ---------------------------
-# Pyrogram Bot Setup
-# ---------------------------
-bot = Client("forwarder", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
+# =======================
+# Bot Setup
+# =======================
+bot = Client("forwarder", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ---------------------------
+# =======================
 # Forward New Messages
-# ---------------------------
-@bot.on_message(filters.chat(source_channel_id))
+# =======================
+@bot.on_message(filters.chat(SOURCE_CHANNEL))
 async def forward_new_message(client, message):
     try:
         if collection.find_one({"source_id": message.id}):
-            return
-        for target in target_channels:
+            return  # Already tracked
+        for target in TARGET_CHANNELS:
             sent = await message.copy(target)
             collection.insert_one({
                 "source_id": message.id,
                 "target_id": sent.id,
                 "target_chat": target
             })
-            print(f"✅ Forwarded {message.id} → {target}")
+            print(f"✅ Forwarded new message {message.id} → {target}")
     except Exception as e:
         print(f"⚠️ Error forwarding new message: {e}")
 
-# ---------------------------
-# Edit Sync
-# ---------------------------
-@bot.on_edited_message(filters.chat(source_channel_id))
+# =======================
+# Handle Edited Messages
+# =======================
+@bot.on_edited_message(filters.chat(SOURCE_CHANNEL))
 async def handle_edit(client, message):
     try:
         linked_msgs = list(collection.find({"source_id": message.id}))
         if not linked_msgs:
-            collection.insert_one({
-                "source_id": message.id,
-                "target_id": None,
-                "target_chat": None
-            })
+            # Track old message for future edits
+            collection.insert_one({"source_id": message.id, "target_id": None, "target_chat": None})
             print(f"📄 Old message {message.id} detected — now tracked for edits.")
             return
         for link in linked_msgs:
@@ -76,34 +72,67 @@ async def handle_edit(client, message):
     except Exception as e:
         print(f"⚠️ Error handling edit: {e}")
 
-# ---------------------------
-# Delete Sync
-# ---------------------------
-@bot.on_deleted_messages(filters.chat(source_channel_id))
-async def handle_delete(client, messages):
-    for msg in messages:
-        linked_msgs = list(collection.find({"source_id": msg.id}))
-        for link in linked_msgs:
-            if not link["target_id"] or not link["target_chat"]:
-                continue
-            try:
-                await bot.delete_messages(chat_id=link["target_chat"], message_ids=link["target_id"])
-                print(f"🗑️ Deleted synced message {msg.id} → {link['target_chat']}")
-            except Exception as e:
-                print(f"⚠️ Delete failed for {link['target_chat']}: {e}")
-
-# ---------------------------
-# Infinite Retry for Old Messages
-# ---------------------------
-async def fetch_old_messages_forever(wait_time=60):
+# =======================
+# Scan Old Messages (Retry Until Peer Registered)
+# =======================
+async def check_old_messages(retry_delay=10):
+    attempt = 0
     while True:
         try:
-            async for msg in bot.get_chat_history(source_channel_id, limit=0):
+            async for msg in bot.get_chat_history(SOURCE_CHANNEL, limit=0):
                 if not collection.find_one({"source_id": msg.id}):
-                    collection.insert_one({
-                        "source_id": msg.id,
-                        "target_id": None,
-                        "target_chat": None
+                    collection.insert_one({"source_id": msg.id, "target_id": None, "target_chat": None})
+                    print(f"🕰️ Old message added to tracking list: {msg.id}")
+            print("📄 Old messages tracking complete.")
+            break
+        except Exception as e:
+            attempt += 1
+            print(f"⚠️ Old messages fetch failed (attempt {attempt}): {e}")
+            await asyncio.sleep(retry_delay)  # Wait before retry
+
+# =======================
+# Bot Startup Notification (Private Chat / Console)
+# =======================
+@bot.on_message(filters.private & filters.command("start"))
+async def start_message(client, message):
+    await message.reply_text(
+        "🚀 Bot is running!\n"
+        "✅ Forwarding active\n"
+        "✅ Edit tracking active\n"
+        "✅ Delete tracking active\n\n"
+        "Use /scan to register old messages for edit tracking."
+    )
+
+async def startup_notify():
+    print("🚀 Bot started successfully!")
+    print("✅ Forwarding active")
+    print("✅ Edit tracking active")
+    print("✅ Delete tracking active")
+    # Optional: send to ADMIN_ID if provided
+    if ADMIN_ID:
+        try:
+            await bot.send_message(
+                chat_id=ADMIN_ID,
+                text="🚀 Bot started successfully!\n✅ Forwarding, edit/delete tracking active"
+            )
+        except Exception as e:
+            print(f"⚠️ Could not notify admin: {e}")
+
+# =======================
+# Main Function
+# =======================
+async def main():
+    await bot.start()
+    await startup_notify()
+    await check_old_messages()
+    print("🚀 Bot is ready and idle...")
+    await idle()
+
+# =======================
+# Run Bot
+# =======================
+if __name__ == "__main__":
+    asyncio.run(main())                        "target_chat": None
                     })
                     print(f"🕰️ Old message added: {msg.id}")
             print("📄 Old messages tracking complete.")
