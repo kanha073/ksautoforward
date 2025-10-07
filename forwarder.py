@@ -7,7 +7,7 @@ import os
 api_id = int(os.getenv("API_ID"))
 api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
-invite_link = os.getenv("SOURCE_INVITE")  # Use Telegram join link here
+invite_link = os.getenv("SOURCE_INVITE")  # Telegram join link
 target_channels = [int(ch.strip()) for ch in os.getenv("TARGET_CHANNELS").split(",")]
 mongo_uri = os.getenv("MONGO_URI")
 
@@ -23,6 +23,9 @@ async def setup_source_channel():
     """Join private channel using invite link and return channel ID"""
     try:
         chat = await bot.join_chat(invite_link)
+        if chat is None or chat.id is None:
+            print("❌ Invalid invite link or bot cannot join the channel.")
+            return None
         print(f"✅ Joined channel: {chat.title} (ID: {chat.id})")
         return chat.id
     except Exception as e:
@@ -30,7 +33,6 @@ async def setup_source_channel():
         return None
 
 
-@bot.on_message(filters.chat(lambda chat_id: chat_id == source_channel_id))
 async def forward_new_message(client, message):
     """Forward new messages from source to targets"""
     try:
@@ -48,7 +50,6 @@ async def forward_new_message(client, message):
         print(f"⚠️ Error forwarding new message: {e}")
 
 
-@bot.on_edited_message(filters.chat(lambda chat_id: chat_id == source_channel_id))
 async def handle_edit(client, message):
     """Sync edits to target channels"""
     try:
@@ -100,7 +101,13 @@ async def start_bot():
     source_channel_id = await setup_source_channel()
     if not source_channel_id:
         print("❌ Cannot start bot without source channel access.")
+        await bot.stop()
         return
+
+    # Register handlers
+    bot.add_handler(bot.on_message(filters.chat(lambda chat_id: chat_id == source_channel_id))(forward_new_message))
+    bot.add_handler(bot.on_edited_message(filters.chat(lambda chat_id: chat_id == source_channel_id))(handle_edit))
+
     await check_old_messages()
     print("🚀 Bot running — forwarding + edit sync active!")
     await idle()
