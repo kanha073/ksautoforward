@@ -74,5 +74,25 @@ async def edit_in_channels(client, message):
         except Exception as e:
             print(f"❌ Error editing in {channel_id}: {e}")
 
-print("🚀 Bot started with DB-based edit sync")
+# Handle deletions
+@app.on_deleted_messages(filters.chat(SOURCE_CHANNEL))
+async def delete_in_channels(client, messages):
+    for message_id in messages:
+        mappings = get_mappings(message_id)
+        if not mappings:
+            print(f"⚠️ No mappings found for deleted msg {message_id}")
+            continue
+
+        for channel_id, target_id in mappings:
+            try:
+                await client.delete_messages(channel_id, target_id)
+                print(f"🗑️ Deleted msg {target_id} in {channel_id}")
+            except Exception as e:
+                print(f"❌ Error deleting in {channel_id}: {e}")
+
+        # Remove mapping from DB
+        cursor.execute("DELETE FROM message_map WHERE source_id=?", (message_id,))
+        conn.commit()
+
+print("🚀 Bot started with DB-based edit and delete sync")
 app.run()
