@@ -12,7 +12,7 @@ SOURCE_CHANNEL = int(os.getenv("SOURCE_CHANNEL"))
 TARGET_CHANNELS = [int(x) for x in os.getenv("TARGET_CHANNELS").split(",")]
 MONGO_URL = os.getenv("MONGO_URL")
 
-# 🔹 MongoDB setup
+# 🔹 MongoDB Setup
 mongo_client = MongoClient(MONGO_URL)
 db = mongo_client["forwarder_bot"]
 collection = db["message_mappings"]
@@ -21,7 +21,7 @@ sync_status = db["sync_status"]
 # 🔹 Pyrogram Client
 app = Client("forwarder_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# 🔹 MongoDB Helpers
+# 🔹 MongoDB Helper Functions
 def save_mapping(source_id, mapping_dict):
     collection.update_one(
         {"source_msg_id": source_id},
@@ -44,12 +44,12 @@ def update_last_synced(msg_id):
         upsert=True
     )
 
-# 🔹 Initial Bulk Sync (First Target Channel)
+# 🔹 Initial Bulk Sync (First Target Channel Only)
 async def initial_sync():
     print("🚀 Starting initial sync...")
     last_synced = get_last_synced()
     offset_id = 0
-    batch_size = 50
+    batch_size = 50  # Telegram API safe batch
 
     while True:
         messages = await app.get_chat_history(SOURCE_CHANNEL, limit=batch_size, offset_id=offset_id)
@@ -68,17 +68,17 @@ async def initial_sync():
                 sent = await app.send_message(chat_id=TARGET_CHANNELS[0], text=text)
                 save_mapping(msg.id, {TARGET_CHANNELS[0]: sent.id})
                 update_last_synced(msg.id)
-                await asyncio.sleep(0.5)  # wait between messages
+                await asyncio.sleep(0.5)  # delay between messages
             except Exception as e:
                 print(f"❌ Error sending message {msg.id}: {e}")
                 await asyncio.sleep(2)
 
         offset_id = messages[-1].id
-        await asyncio.sleep(2)  # wait between batches
+        await asyncio.sleep(2)  # delay between batches
 
-    print("✅ Initial sync complete!")
+    print("✅ Initial sync complete for first target channel!")
 
-# 🔹 Live Forwarding of New Messages
+# 🔹 Live Forwarding to All Target Channels
 @app.on_message(filters.chat(SOURCE_CHANNEL))
 async def forward_new_messages(client, message):
     text = message.text or message.caption
@@ -90,6 +90,7 @@ async def forward_new_messages(client, message):
         try:
             sent = await client.send_message(chat_id=channel, text=text)
             mapping[channel] = sent.id
+            await asyncio.sleep(0.3)  # small delay between channels
         except Exception as e:
             print(f"❌ Error sending new message to {channel}: {e}")
 
@@ -113,8 +114,8 @@ async def edit_in_channels(client, message):
         except Exception as e:
             print(f"❌ Error editing message {message.id} in {channel}: {e}")
 
-# 🔹 Start Bot
+# 🔹 Start Bot and Initial Sync
 app.start()
 app.loop.run_until_complete(initial_sync())
-print("🚀 Initial sync done, now live forwarding will continue...")
+print("🚀 Initial sync done! Live forwarding + edit sync active now...")
 app.run()
