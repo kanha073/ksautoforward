@@ -44,15 +44,19 @@ def update_last_synced(msg_id):
         upsert=True
     )
 
-# 🔹 Initial Bulk Sync (First Target Channel Only)
+# 🔹 Initial Bulk Sync (First Target Channel)
 async def initial_sync():
     print("🚀 Starting initial sync...")
     last_synced = get_last_synced()
     offset_id = 0
-    batch_size = 50  # Telegram API safe batch
+    batch_size = 50
 
     while True:
-        messages = await app.get_chat_history(SOURCE_CHANNEL, limit=batch_size, offset_id=offset_id)
+        messages = []
+        # Pyrogram 3.x: async generator
+        async for msg in app.get_chat_history(SOURCE_CHANNEL, limit=batch_size, offset_id=offset_id):
+            messages.append(msg)
+
         if not messages:
             break
 
